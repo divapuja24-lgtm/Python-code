@@ -1,0 +1,293 @@
+import csv
+import random
+import math
+
+def generate_spatial_income_data(filename="UMKM_Pendapatan_Spasial.txt"):
+    print(f"--- [GENERATOR] Membuat Data Simulasi: {filename} ---")
+    print("Skenario: 200 Strata Awal (Kabupaten/Kota) sebelum Collapsing")
+    print("Grid: 10 Baris x 20 Kolom")
+
+    ROWS = 10; COLS = 20
+    ECONOMIC_CENTER_ROW = 7; ECONOMIC_CENTER_COL = 10
+
+    header = ['j', 'row', 'column', 'PSU_ID', 'Y_Pendapatan_Juta']
+    data_rows = []
+    ssu_counter = 1
+
+    for r in range(1, ROWS + 1):
+        for c in range(1, COLS + 1):
+            psu_id = (r - 1) * COLS + c
+
+            # Pola Spasial: Semakin dekat pusat ekonomi, pendapatan makin tinggi
+            dist = math.sqrt((r - ECONOMIC_CENTER_ROW)**2 + (c - ECONOMIC_CENTER_COL)**2)
+
+            if dist < 4:
+                base_mean = 250; sd = 80; n_villages = random.randint(15, 25)
+            elif dist < 8:
+                base_mean = 120; sd = 40; n_villages = random.randint(10, 20)
+            else:
+                base_mean = 60; sd = 15; n_villages = random.randint(5, 12)
+
+            for _ in range(n_villages):
+                y_val = base_mean + random.normalvariate(0, sd)
+                if random.random() < 0.05: y_val *= 2.5 # Outlier
+                y_val = max(10, y_val)
+
+                data_rows.append({
+                    'j': ssu_counter, 'row': r, 'column': c,
+                    'PSU_ID': psu_id, 'Y_Pendapatan_Juta': round(y_val, 2)
+                })
+                ssu_counter += 1
+
+    with open(filename, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=header, delimiter='\t')
+        writer.writeheader()
+        writer.writerows(data_rows)
+    print(f"-> Selesai. Data 200 Kabupaten tersimpan.")
+
+if __name__ == "__main__":
+    generate_spatial_income_data()
+
+import csv
+import math
+import random
+import copy
+
+# ==============================================================================
+# BAGIAN I: DATA LOADING
+# ==============================================================================
+
+def load_data(filename):
+    print(f"\n[INIT] Membaca Data: {filename}...")
+    ssu_data = []
+    try:
+        with open(filename, 'r') as f:
+            reader = csv.DictReader(f, delimiter='\t')
+            for row in reader:
+                ssu_data.append({
+                    'j': int(row['j']) - 1,
+                    'psu': int(row['PSU_ID']) - 1,
+                    'y': float(row['Y_Pendapatan_Juta']),
+                    'row': int(row['row']),
+                    'col': int(row['column'])
+                })
+    except FileNotFoundError:
+        print("Error: File data tidak ditemukan."); return None
+
+    all_psus = set(d['psu'] for d in ssu_data)
+    N2 = max(all_psus) + 1
+    N3 = len(ssu_data)
+    Y3 = [0.0]*N3; C3 = [0]*N3; N_vec = [0]*N2; psu_coords = {}
+
+    for item in ssu_data:
+        idx = item['j']; psu = item['psu']
+        Y3[idx] = item['y']; C3[idx] = psu
+        N_vec[psu] += 1; psu_coords[psu] = (item['row'], item['col'])
+
+    print(f"-> Load Sukses: {N2} PSU (Kabupaten), {N3} SSU (Desa).")
+    return Y3, C3, N_vec, psu_coords, N2, N3
+
+def build_adjacency_matrix(psu_coords, N2):
+    adj = [[0]*N2 for _ in range(N2)]
+    coord_to_psu = {v: k for k, v in psu_coords.items()}
+    for i in range(N2):
+        if i not in psu_coords: continue
+        r, c = psu_coords[i]
+        for nr, nc in [(r-1, c), (r+1, c), (r, c-1), (r, c+1)]:
+            if (nr, nc) in coord_to_psu: adj[i][coord_to_psu[(nr, nc)]] = 1
+    return adj
+
+# ==============================================================================
+# BAGIAN II: ALGORITMA UTAMA
+# ==============================================================================
+
+def Algorithm1_SampleWithinGroups(idx_list, m):
+    if m >= len(idx_list): return list(idx_list)
+    return sorted(random.sample(idx_list, m))
+
+def Algorithm7_Initialize(N2): return list(range(N2))
+
+def Algorithm8_Aggregate(groups, s, t):
+    sg = groups[s]; tg = groups[t]
+    for i in range(len(groups)):
+        if groups[i] == sg: groups[i] = tg
+    return groups
+
+def Algorithm9_BuildStrataGroups(groups):
+    u = sorted(list(set(groups)))
+    m = {old: new for new, old in enumerate(u)}
+    return [m[g] for g in groups], len(u)
+
+# --- ALGORITMA 11: COLLAPSING 200 -> 10 ---
+def Algorithm11_AggregateDeterministic(N_vec, N2, target_strata, adj_matrix):
+    print("\n" + "="*50)
+    print(" [ALGORITMA 11] PEMBENTUKAN STRATA (ZONASI)")
+    print("="*50)
+    print(f"-> Input: {N2} Kabupaten dengan data pendapatan heterogen.")
+    print(f"-> Proses: Menggabungkan Kabupaten bertetangga menjadi {target_strata} Zona Ekonomi.")
+
+    groups = Algorithm7_Initialize(N2)
+
+    while True:
+        C1, N0 = Algorithm9_BuildStrataGroups(groups)
+        if N0 <= target_strata: break
+
+        group_sizes = {g: sum(N_vec[i] for i in range(N2) if C1[i] == g) for g in range(N0)}
+        smallest_g = min(group_sizes, key=group_sizes.get)
+        members = [i for i in range(N2) if C1[i] == smallest_g]
+
+        candidates = set()
+        for m in members:
+            for n_idx in range(N2):
+                if adj_matrix[m][n_idx] == 1:
+                    if C1[n_idx] != smallest_g: candidates.add(C1[n_idx])
+
+        target = -1
+        if candidates: target = min(candidates, key=lambda x: group_sizes.get(x, 0))
+        else:
+            others = [g for g in range(N0) if g != smallest_g]
+            if others: target = min(others, key=lambda x: group_sizes.get(x, 0))
+
+        if target != -1:
+            idx_s = members[0]; idx_t = [i for i in range(N2) if C1[i] == target][0]
+            groups = Algorithm8_Aggregate(groups, idx_s, idx_t)
+
+    final_map, N0 = Algorithm9_BuildStrataGroups(groups)
+    print(f"-> Selesai. Terbentuk {N0} Collapsed Strata.")
+    return final_map, N0
+
+# --- ALGORITMA 2: SAMPLING ---
+def Algorithm2_StratifiedTwoStage(N0, C1_map, m_sample, n_sample, N2, C3):
+    strata_psus = {}
+    for psu, group in enumerate(C1_map):
+        if group not in strata_psus: strata_psus[group] = []
+        strata_psus[group].append(psu)
+
+    I2 = [False]*N2; m_counts = [0]*N0
+    for g in range(N0):
+        members = strata_psus.get(g, [])
+        selected = Algorithm1_SampleWithinGroups(members, m_sample)
+        for p in selected: I2[p] = True; m_counts[g] += 1
+
+    I3 = [False]*len(C3); n_counts = [0]*N2
+    psu_ssu = {}
+    for ssu_id, psu_id in enumerate(C3):
+        if psu_id not in psu_ssu: psu_ssu[psu_id] = []
+        psu_ssu[psu_id].append(ssu_id)
+
+    for psu in range(N2):
+        if I2[psu]:
+            members = psu_ssu.get(psu, [])
+            selected = Algorithm1_SampleWithinGroups(members, n_sample)
+            for s in selected: I3[s] = True; n_counts[psu] += 1
+
+    return I2, I3, m_counts, n_counts
+
+# --- ESTIMASI TOTAL (Alg 3 & 4) ---
+def EstimateTotalsAndVariances(N0, C1_map, I2, I3, C3, Y3, N_vec, m_counts, n_counts):
+    N2 = len(N_vec); S2 = [0.0]*N2
+    for j in range(len(Y3)):
+        if I3[j]: S2[C3[j]] += Y3[j]
+
+    Y2_est = [0.0]*N2
+    for i in range(N2):
+        if I2[i] and n_counts[i] > 0:
+            Y2_est[i] = (N_vec[i] / n_counts[i]) * S2[i]
+
+    M_vec = [0]*N0
+    for g in C1_map: M_vec[g] += 1
+
+    Y1_est = [0.0]*N0
+    for g in range(N0):
+        sum_y2 = sum(Y2_est[i] for i in range(N2) if C1_map[i] == g and I2[i])
+        if m_counts[g] > 0:
+            Y1_est[g] = (M_vec[g] / m_counts[g]) * sum_y2
+
+    V1_est = [0.0]*N0
+    for g in range(N0):
+        if m_counts[g] > 1:
+            mean_strata = Y1_est[g] / M_vec[g] if M_vec[g] > 0 else 0
+            sum_sq = sum((Y2_est[i] - mean_strata)**2 for i in range(N2) if C1_map[i] == g and I2[i])
+            var_sample = sum_sq / (m_counts[g] - 1)
+            V1_est[g] = (M_vec[g]**2) * (1 - m_counts[g]/M_vec[g]) * (var_sample / m_counts[g])
+
+    return sum(Y1_est), sum(V1_est), Y1_est, V1_est
+
+# --- ESTIMASI MEAN (Alg 5 & 6) ---
+def EstimateMeansAndVariances(Total_Y, Total_Var, Y1_est, N0, C1_map, N_vec, V1_est):
+    NH_vec = [0] * N0
+    for i, g in enumerate(C1_map):
+        NH_vec[g] += N_vec[i]
+
+    Y1_mean_est = [0.0] * N0
+    for g in range(N0):
+        if NH_vec[g] > 0:
+            Y1_mean_est[g] = Y1_est[g] / NH_vec[g]
+
+    Total_Pop = sum(NH_vec)
+    Global_Mean = Total_Y / Total_Pop if Total_Pop > 0 else 0
+    Global_Var_Mean = Total_Var / (Total_Pop**2) if Total_Pop > 0 else 0
+
+    # Varians Mean per strata: DIHITUNG DENGAN MEMANFAATKAN V1_est
+    V1_mean_est = [0.0] * N0
+    for g in range(N0):
+        if NH_vec[g] > 0:
+            # V(Y_mean_h) = V(Y_total_h) / N_h^2
+            V1_mean_est[g] = V1_est[g] / (NH_vec[g] ** 2)
+        else:
+            V1_mean_est[g] = 0
+
+    return Global_Mean, Global_Var_Mean, Y1_mean_est, V1_mean_est, NH_vec
+
+# ==============================================================================
+# MAIN EXECUTION
+# ==============================================================================
+
+def main():
+    print("=========================================================")
+    print(" PROGRAM ESTIMASI PENDAPATAN WILAYAH (SIMULASI)")
+    print("=========================================================")
+
+    # 1. LOAD DATA
+    data = load_data('UMKM_Pendapatan_Spasial.txt')
+    if not data: return
+    Y3, C3, N_vec, psu_coords, N2, N3 = data
+
+    # 2. COLLAPSING (200 -> 10)
+    adj_matrix = build_adjacency_matrix(psu_coords, N2)
+    C1_map, N0 = Algorithm11_AggregateDeterministic(N_vec, N2, target_strata=10, adj_matrix=adj_matrix)
+
+    # 3. SAMPLING
+    m_sample = 2; n_sample = 10
+    I2, I3, m_counts, n_counts = Algorithm2_StratifiedTwoStage(N0, C1_map, m_sample, n_sample, N2, C3)
+
+    # 4. HITUNG ESTIMASI (TOTAL & MEAN)
+    print("\n" + "="*50)
+    print(" [ALGORITMA 3-6] HASIL ESTIMASI PENDAPATAN")
+    print("="*50)
+
+    Total_Y, Total_Var, Y1_est, V1_est = EstimateTotalsAndVariances(N0, C1_map, I2, I3, C3, Y3, N_vec, m_counts, n_counts)
+    Global_Mean, Global_Var_Mean, Y1_mean_est, V1_mean_est, NH_vec = EstimateMeansAndVariances(Total_Y, Total_Var, Y1_est, N0, C1_map, N_vec, V1_est)
+
+    # --- PRINT HASIL LENGKAP ---
+    print(f"\n{'Strata':<8} | {'Pop (Desa)':<12} | {'Est Mean (Juta)':<20} | {'Var Mean':<20}")
+    print("-" * 90)
+
+    for g in range(N0):
+        print(f"{g+1:<8} | {NH_vec[g]:<12} | {Y1_mean_est[g]:<20.2f} | {V1_mean_est[g]:<20.2f}")
+    print("-" * 90)
+
+    # --- PRINT RANGKUMAN AKHIR (DENGAN RUPIAH) ---
+    # Fungsi format manual untuk rupiah (koma desimal, titik ribuan)
+    def fmt_idr(val): return f"{val:,.4f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    print(f"\n[RANGKUMAN AKHIR]")
+    print(f"-> Estimasi Total Populasi : Rp {fmt_idr(Total_Y)}")
+    print(f"-> Varians Total           : Rp {fmt_idr(Total_Var)}")
+    print(f"-> Estimasi Mean Populasi  : Rp {fmt_idr(Global_Mean)}")
+    print(f"-> Varians Mean            : Rp {fmt_idr(Global_Var_Mean)}")
+
+    print("\n[SELESAI]")
+
+if __name__ == "__main__":
+    main()
